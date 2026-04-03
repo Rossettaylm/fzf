@@ -86,7 +86,7 @@ func TestFuzzyMatch(t *testing.T) {
 					scoreGapStart*2+scoreGapExtension*2)
 			assertMatch(t, fn, true, forward, "FooBar Baz", "FooB", 0, 4,
 				scoreMatch*4+int(bonusBoundaryWhite)*bonusFirstCharMultiplier+int(bonusBoundaryWhite)*2+
-					util.Max(bonusCamel123, int(bonusBoundaryWhite)))
+					max(bonusCamel123, int(bonusBoundaryWhite)))
 
 			// Consecutive bonus updated
 			assertMatch(t, fn, true, forward, "foo-bar", "o-ba", 2, 6,
@@ -199,4 +199,13 @@ func TestLongString(t *testing.T) {
 	}
 	bytes[math.MaxUint16] = 'z'
 	assertMatch(t, FuzzyMatchV2, true, true, string(bytes), "zx", math.MaxUint16, math.MaxUint16+2, scoreMatch*2+bonusConsecutive)
+}
+
+func TestLongStringWithNormalize(t *testing.T) {
+	bytes := make([]byte, 30000)
+	for i := range bytes {
+		bytes[i] = 'x'
+	}
+	unicodeString := string(bytes) + " Minímal example"
+	assertMatch2(t, FuzzyMatchV1, false, true, false, unicodeString, "minim", 30001, 30006, 140)
 }

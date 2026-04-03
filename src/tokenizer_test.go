@@ -40,13 +40,25 @@ func TestParseRange(t *testing.T) {
 			t.Errorf("%v", r)
 		}
 	}
+	{
+		i := "1..3..5"
+		if r, ok := ParseRange(&i); ok {
+			t.Errorf("%v", r)
+		}
+	}
+	{
+		i := "-3..3"
+		if r, ok := ParseRange(&i); ok {
+			t.Errorf("%v", r)
+		}
+	}
 }
 
 func TestTokenize(t *testing.T) {
 	// AWK-style
-	input := "  abc:  def:  ghi  "
+	input := "  abc: \n\t def:  ghi  "
 	tokens := Tokenize(input, Delimiter{})
-	if tokens[0].text.ToString() != "abc:  " || tokens[0].prefixLength != 2 {
+	if tokens[0].text.ToString() != "abc: \n\t " || tokens[0].prefixLength != 2 {
 		t.Errorf("%s", tokens)
 	}
 
@@ -59,9 +71,9 @@ func TestTokenize(t *testing.T) {
 	// With delimiter regex
 	tokens = Tokenize(input, delimiterRegexp("\\s+"))
 	if tokens[0].text.ToString() != "  " || tokens[0].prefixLength != 0 ||
-		tokens[1].text.ToString() != "abc:  " || tokens[1].prefixLength != 2 ||
-		tokens[2].text.ToString() != "def:  " || tokens[2].prefixLength != 8 ||
-		tokens[3].text.ToString() != "ghi  " || tokens[3].prefixLength != 14 {
+		tokens[1].text.ToString() != "abc: \n\t " || tokens[1].prefixLength != 2 ||
+		tokens[2].text.ToString() != "def:  " || tokens[2].prefixLength != 10 ||
+		tokens[3].text.ToString() != "ghi  " || tokens[3].prefixLength != 16 {
 		t.Errorf("%s", tokens)
 	}
 }
@@ -73,14 +85,14 @@ func TestTransform(t *testing.T) {
 		{
 			ranges, _ := splitNth("1,2,3")
 			tx := Transform(tokens, ranges)
-			if joinTokens(tx) != "abc:  def:  ghi:  " {
+			if JoinTokens(tx) != "abc:  def:  ghi:  " {
 				t.Errorf("%s", tx)
 			}
 		}
 		{
 			ranges, _ := splitNth("1..2,3,2..,1")
 			tx := Transform(tokens, ranges)
-			if string(joinTokens(tx)) != "abc:  def:  ghi:  def:  ghi:  jklabc:  " ||
+			if string(JoinTokens(tx)) != "abc:  def:  ghi:  def:  ghi:  jklabc:  " ||
 				len(tx) != 4 ||
 				tx[0].text.ToString() != "abc:  def:  " || tx[0].prefixLength != 2 ||
 				tx[1].text.ToString() != "ghi:  " || tx[1].prefixLength != 14 ||
@@ -95,7 +107,7 @@ func TestTransform(t *testing.T) {
 		{
 			ranges, _ := splitNth("1..2,3,2..,1")
 			tx := Transform(tokens, ranges)
-			if joinTokens(tx) != "  abc:  def:  ghi:  def:  ghi:  jkl  abc:" ||
+			if JoinTokens(tx) != "  abc:  def:  ghi:  def:  ghi:  jkl  abc:" ||
 				len(tx) != 4 ||
 				tx[0].text.ToString() != "  abc:  def:" || tx[0].prefixLength != 0 ||
 				tx[1].text.ToString() != "  ghi:" || tx[1].prefixLength != 12 ||

@@ -1,30 +1,11 @@
 package fzf
 
 import (
-	"os"
 	"os/exec"
-
-	"github.com/junegunn/fzf/src/tui"
 )
 
 func runTmux(args []string, opts *Options) (int, error) {
-	// Prepare arguments
-	fzf := args[0]
-	args = append([]string{"--bind=ctrl-z:ignore"}, args[1:]...)
-	if opts.BorderShape == tui.BorderUndefined {
-		args = append(args, "--border")
-	}
-	argStr := escapeSingleQuote(fzf)
-	for _, arg := range args {
-		argStr += " " + escapeSingleQuote(arg)
-	}
-	argStr += ` --no-tmux --no-height`
-
-	// Get current directory
-	dir, err := os.Getwd()
-	if err != nil {
-		dir = "."
-	}
+	argStr, dir := popupArgStr(args, opts)
 
 	// Set tmux options for popup placement
 	// C        Both    The centre of the terminal
@@ -33,7 +14,10 @@ func runTmux(args []string, opts *Options) (int, error) {
 	// M        Both    The mouse position
 	// W        Both    The window position on the status line
 	// S        -y      The line above or below the status line
-	tmuxArgs := []string{"display-popup", "-E", "-B", "-d", dir}
+	tmuxArgs := []string{"display-popup", "-E", "-d", dir}
+	if !opts.Tmux.border {
+		tmuxArgs = append(tmuxArgs, "-B")
+	}
 	switch opts.Tmux.position {
 	case posUp:
 		tmuxArgs = append(tmuxArgs, "-xC", "-y0")

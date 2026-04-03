@@ -18,7 +18,7 @@ func IsLightRendererSupported() bool {
 	return true
 }
 
-func (r *LightRenderer) defaultTheme() *ColorTheme {
+func (r *LightRenderer) DefaultTheme() *ColorTheme {
 	if strings.Contains(os.Getenv("TERM"), "256") {
 		return Dark256
 	}
@@ -42,26 +42,35 @@ func (r *LightRenderer) closePlatform() {
 	r.ttyout.Close()
 }
 
-func openTty(mode int) (*os.File, error) {
-	in, err := os.OpenFile(consoleDevice, mode, 0)
-	if err != nil {
+func openTty(ttyDefault string, mode int) (*os.File, error) {
+	var in *os.File
+	var err error
+	if len(ttyDefault) > 0 {
+		in, err = os.OpenFile(ttyDefault, mode, 0)
+	}
+	if in == nil || err != nil || ttyDefault != DefaultTtyDevice && !util.IsTty(in) {
 		tty := ttyname()
 		if len(tty) > 0 {
 			if in, err := os.OpenFile(tty, mode, 0); err == nil {
 				return in, nil
 			}
 		}
-		return nil, errors.New("failed to open " + consoleDevice)
+		if ttyDefault != DefaultTtyDevice {
+			if in, err = os.OpenFile(DefaultTtyDevice, mode, 0); err == nil {
+				return in, nil
+			}
+		}
+		return nil, errors.New("failed to open " + DefaultTtyDevice)
 	}
 	return in, nil
 }
 
-func openTtyIn() (*os.File, error) {
-	return openTty(syscall.O_RDONLY)
+func openTtyIn(ttyDefault string) (*os.File, error) {
+	return openTty(ttyDefault, syscall.O_RDONLY)
 }
 
-func openTtyOut() (*os.File, error) {
-	return openTty(syscall.O_WRONLY)
+func openTtyOut(ttyDefault string) (*os.File, error) {
+	return openTty(ttyDefault, syscall.O_WRONLY)
 }
 
 func (r *LightRenderer) setupTerminal() {
@@ -89,8 +98,8 @@ func (r *LightRenderer) findOffset() (row int, col int) {
 	r.flush()
 	var err error
 	bytes := []byte{}
-	for tries := 0; tries < offsetPollTries; tries++ {
-		bytes, err = r.getBytesInternal(bytes, tries > 0)
+	for tries := range offsetPollTries {
+		bytes, _, err = r.getBytesInternal(false, bytes, tries > 0)
 		if err != nil {
 			return -1, -1
 		}
@@ -105,15 +114,62 @@ func (r *LightRenderer) findOffset() (row int, col int) {
 	return -1, -1
 }
 
-func (r *LightRenderer) getch(nonblock bool) (int, bool) {
-	b := make([]byte, 1)
+func (r *LightRenderer) getch(cancellable bool, nonblock bool) (int, getCharResult) {
 	fd := r.fd()
-	util.SetNonblock(r.ttyin, nonblock)
-	_, err := util.Read(fd, b)
-	if err != nil {
-		return 0, false
+	getter := func() (int, getCharResult) {
+		b := make([]byte, 1)
+		util.SetNonblock(r.ttyin, nonblock)
+		_, err := util.Read(fd, b)
+		if err != nil {
+			return 0, getCharError
+		}
+		return int(b[0]), getCharSuccess
 	}
-	return int(b[0]), true
+	if nonblock || !cancellable {
+		return getter()
+	}
+
+	rpipe, wpipe, err := os.Pipe()
+	if err != nil {
+		// Fallback to blocking read without cancellation
+		return getter()
+	}
+	r.setCancel(func() {
+		wpipe.Write([]byte{0})
+	})
+	defer func() {
+		r.setCancel(nil)
+		rpipe.Close()
+		wpipe.Close()
+	}()
+
+	cancelFd := int(rpipe.Fd())
+	for range maxSelectTries {
+		var rfds unix.FdSet
+		limit := len(rfds.Bits) * unix.NFDBITS
+		if fd >= limit || cancelFd >= limit {
+			return getter()
+		}
+
+		rfds.Set(fd)
+		rfds.Set(cancelFd)
+		_, err := unix.Select(max(fd, cancelFd)+1, &rfds, nil, nil, nil)
+		if err != nil {
+			if err == syscall.EINTR {
+				continue
+			}
+			return 0, getCharError
+		}
+
+		if rfds.IsSet(cancelFd) {
+			return 0, getCharCancelled
+		}
+
+		if rfds.IsSet(fd) {
+			return getter()
+		}
+	}
+	return 0, getCharError
 }
 
 func (r *LightRenderer) Size() TermSize {

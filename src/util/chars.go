@@ -52,7 +52,7 @@ func ToChars(bytes []byte) Chars {
 	}
 
 	runes := make([]rune, bytesUntil, len(bytes))
-	for i := 0; i < bytesUntil; i++ {
+	for i := range bytesUntil {
 		runes[i] = rune(bytes[i])
 	}
 	for i := bytesUntil; i < len(bytes); {
@@ -184,9 +184,31 @@ func (chars *Chars) TrailingWhitespaces() int {
 	return whitespaces
 }
 
-func (chars *Chars) TrimTrailingWhitespaces() {
+func (chars *Chars) TrimTrailingWhitespaces(maxIndex int) {
 	whitespaces := chars.TrailingWhitespaces()
-	chars.slice = chars.slice[0 : len(chars.slice)-whitespaces]
+	end := len(chars.slice) - whitespaces
+	chars.slice = chars.slice[0:max(end, maxIndex)]
+}
+
+func (chars *Chars) TrimSuffix(runes []rune) {
+	lastIdx := len(chars.slice)
+	firstIdx := lastIdx - len(runes)
+	if firstIdx < 0 {
+		return
+	}
+
+	for i := firstIdx; i < lastIdx; i++ {
+		char := chars.Get(i)
+		if char != runes[i-firstIdx] {
+			return
+		}
+	}
+
+	chars.slice = chars.slice[0:firstIdx]
+}
+
+func (chars *Chars) SliceRight(last int) {
+	chars.slice = chars.slice[:last]
 }
 
 func (chars *Chars) ToString() string {
@@ -227,7 +249,7 @@ func (chars *Chars) Prepend(prefix string) {
 	}
 }
 
-func (chars *Chars) Lines(multiLine bool, maxLines int, wrapCols int, wrapSignWidth int, tabstop int) ([][]rune, bool) {
+func (chars *Chars) Lines(multiLine bool, maxLines int, wrapCols int, wrapSignWidth int, tabstop int, wrapWord bool) ([][]rune, bool) {
 	text := make([]rune, chars.Length())
 	copy(text, chars.ToRunes())
 
@@ -237,7 +259,7 @@ func (chars *Chars) Lines(multiLine bool, maxLines int, wrapCols int, wrapSignWi
 		lines = append(lines, text)
 	} else {
 		from := 0
-		for off := 0; off < len(text); off++ {
+		for off := range text {
 			if text[off] == '\n' {
 				lines = append(lines, text[from:off+1]) // Include '\n'
 				from = off + 1
@@ -273,9 +295,10 @@ func (chars *Chars) Lines(multiLine bool, maxLines int, wrapCols int, wrapSignWi
 			line = line[:len(line)-1]
 		}
 
+		hasWrapSign := false
 		for {
 			cols := wrapCols
-			if len(wrapped) > 0 {
+			if hasWrapSign {
 				cols -= wrapSignWidth
 			}
 			_, overflowIdx := RunesWidth(line, 0, tabstop, cols)
@@ -284,13 +307,28 @@ func (chars *Chars) Lines(multiLine bool, maxLines int, wrapCols int, wrapSignWi
 				if overflowIdx == 0 {
 					overflowIdx = 1
 				}
+				if wrapWord {
+					// Find last space/tab at or before overflowIdx
+					breakIdx := -1
+					for k := overflowIdx; k > 0; k-- {
+						if line[k-1] == ' ' || line[k-1] == '\t' {
+							breakIdx = k
+							break
+						}
+					}
+					if breakIdx > 0 {
+						overflowIdx = breakIdx
+					}
+				}
 				if len(wrapped) >= maxLines {
 					return wrapped, true
 				}
 				wrapped = append(wrapped, line[:overflowIdx])
+				hasWrapSign = true
 				line = line[overflowIdx:]
 				continue
 			}
+			hasWrapSign = false
 
 			// Restore trailing '\n'
 			if newline {

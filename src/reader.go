@@ -7,6 +7,8 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -120,7 +122,7 @@ func (r *Reader) readChannel(inputChan chan string) bool {
 }
 
 // ReadSource reads data from the default command or from standard input
-func (r *Reader) ReadSource(inputChan chan string, root string, opts walkerOpts, ignores []string, initCmd string, initEnv []string, readyChan chan bool) {
+func (r *Reader) ReadSource(inputChan chan string, roots []string, opts walkerOpts, ignores []string, initCmd string, initEnv []string, readyChan chan bool) {
 	r.startEventPoller()
 	var success bool
 	signalReady := func() {
@@ -137,7 +139,7 @@ func (r *Reader) ReadSource(inputChan chan string, root string, opts walkerOpts,
 		cmd := os.Getenv("FZF_DEFAULT_COMMAND")
 		if len(cmd) == 0 {
 			signalReady()
-			success = r.readFiles(root, opts, ignores)
+			success = r.readFiles(roots, opts, ignores)
 		} else {
 			success = r.readFromCommand(cmd, initEnv, signalReady)
 		}
@@ -176,8 +178,8 @@ func (r *Reader) feed(src io.Reader) {
 	var err error
 	for {
 		n := 0
-		scope := slab[:util.Min(len(slab), readerBufferSize)]
-		for i := 0; i < 100; i++ {
+		scope := slab[:min(len(slab), readerBufferSize)]
+		for range 100 {
 			n, err = src.Read(scope)
 			if n > 0 || err != nil {
 				break
@@ -265,12 +267,53 @@ func trimPath(path string) string {
 	return byteString(bytes)
 }
 
-func (r *Reader) readFiles(root string, opts walkerOpts, ignores []string) bool {
+func (r *Reader) readFiles(roots []string, opts walkerOpts, ignores []string) bool {
 	conf := fastwalk.Config{
 		Follow: opts.follow,
 		// Use forward slashes when running a Windows binary under WSL or MSYS
 		ToSlash: fastwalk.DefaultToSlash(),
 		Sort:    fastwalk.SortFilesFirst,
+	}
+
+	// When following symlinks, precompute the absolute real paths of walker
+	// roots so we can skip symlinks that point to an ancestor. fastwalk's
+	// built-in loop detection (shouldTraverse) catches loops on the second
+	// pass, but a single pass through a symlink like z: -> / already
+	// traverses the entire root filesystem, causing severe resource
+	// exhaustion. Skipping ancestor symlinks prevents this entirely.
+	var absRoots []string
+	if opts.follow {
+		for _, root := range roots {
+			if real, err := filepath.EvalSymlinks(root); err == nil {
+				if abs, err := filepath.Abs(real); err == nil {
+					absRoots = append(absRoots, filepath.Clean(abs))
+				}
+			}
+		}
+	}
+
+	ignoresBase := []string{}
+	ignoresFull := []string{}
+	ignoresSuffix := []string{}
+	sep := string(os.PathSeparator)
+	if _, ok := os.LookupEnv("MSYSTEM"); ok {
+		sep = "/"
+	}
+	for _, ignore := range ignores {
+		if strings.ContainsRune(ignore, os.PathSeparator) {
+			if strings.HasPrefix(ignore, sep) {
+				ignoresSuffix = append(ignoresSuffix, ignore)
+			} else {
+				// 'foo/bar' should match
+				// * 'foo/bar'
+				// * 'baz/foo/bar'
+				// * but NOT 'bazfoo/bar'
+				ignoresFull = append(ignoresFull, ignore)
+				ignoresSuffix = append(ignoresSuffix, sep+ignore)
+			}
+		} else {
+			ignoresBase = append(ignoresBase, ignore)
+		}
 	}
 	fn := func(path string, de os.DirEntry, err error) error {
 		if err != nil {
@@ -278,16 +321,47 @@ func (r *Reader) readFiles(root string, opts walkerOpts, ignores []string) bool 
 		}
 		path = trimPath(path)
 		if path != "." {
-			isDir := de.IsDir()
-			if isDir || opts.follow && isSymlinkToDir(path, de) {
+			isDirSymlink := isSymlinkToDir(path, de)
+			if isDirSymlink && !opts.follow {
+				return filepath.SkipDir
+			}
+			// Skip symlinks whose target is an ancestor of (or equal to)
+			// any walker root. Following such symlinks would traverse a
+			// superset of the tree we're already walking.
+			if isDirSymlink && len(absRoots) > 0 {
+				if target, err := filepath.EvalSymlinks(path); err == nil {
+					if abs, err := filepath.Abs(target); err == nil {
+						abs = filepath.Clean(abs)
+						if abs == string(os.PathSeparator) {
+							return filepath.SkipDir
+						}
+						for _, absRoot := range absRoots {
+							if absRoot == abs || strings.HasPrefix(absRoot, abs+string(os.PathSeparator)) {
+								return filepath.SkipDir
+							}
+						}
+					}
+				}
+			}
+			isDir := de.IsDir() || isDirSymlink
+			if isDir {
 				base := filepath.Base(path)
 				if !opts.hidden && base[0] == '.' && base != ".." {
 					return filepath.SkipDir
 				}
-				for _, ignore := range ignores {
-					if ignore == base {
+				if slices.Contains(ignoresBase, base) {
+					return filepath.SkipDir
+				}
+				if slices.Contains(ignoresFull, path) {
+					return filepath.SkipDir
+				}
+				for _, ignore := range ignoresSuffix {
+					if strings.HasSuffix(path, ignore) {
 						return filepath.SkipDir
 					}
+				}
+				if path != sep {
+					path += sep
 				}
 			}
 			if ((opts.file && !isDir) || (opts.dir && isDir)) && r.pusher(stringBytes(path)) {
@@ -301,7 +375,11 @@ func (r *Reader) readFiles(root string, opts walkerOpts, ignores []string) bool 
 		}
 		return nil
 	}
-	return fastwalk.Walk(&conf, root, fn) == nil
+	noerr := true
+	for _, root := range roots {
+		noerr = noerr && (fastwalk.Walk(&conf, root, fn) == nil)
+	}
+	return noerr
 }
 
 func (r *Reader) readFromCommand(command string, environ []string, signalReady func()) bool {

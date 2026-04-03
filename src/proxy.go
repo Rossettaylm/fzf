@@ -23,6 +23,32 @@ func escapeSingleQuote(str string) string {
 	return "'" + strings.ReplaceAll(str, "'", "'\\''") + "'"
 }
 
+func popupArgStr(args []string, opts *Options) (string, string) {
+	fzf, rest := args[0], args[1:]
+	args = []string{"--bind=ctrl-z:ignore"}
+	if !opts.Tmux.border && (opts.BorderShape == tui.BorderUndefined || opts.BorderShape == tui.BorderLine) {
+		if tui.DefaultBorderShape == tui.BorderRounded {
+			rest = append(rest, "--border=rounded")
+		} else {
+			rest = append(rest, "--border=sharp")
+		}
+	}
+	if opts.Tmux.border && opts.Margin == defaultMargin() {
+		args = append(args, "--margin=0,1")
+	}
+	argStr := escapeSingleQuote(fzf)
+	for _, arg := range append(args, rest...) {
+		argStr += " " + escapeSingleQuote(arg)
+	}
+	argStr += ` --no-popup --no-height`
+
+	dir, err := os.Getwd()
+	if err != nil {
+		dir = "."
+	}
+	return argStr, dir
+}
+
 func fifo(name string) (string, error) {
 	ns := time.Now().UnixNano()
 	output := filepath.Join(os.TempDir(), fmt.Sprintf("fzf-%s-%d", name, ns))
@@ -59,12 +85,12 @@ func runProxy(commandPrefix string, cmdBuilder func(temp string, needBash bool) 
 		})
 	}()
 
-	var command string
+	var command, input string
 	commandPrefix += ` --no-force-tty-in --proxy-script "$0"`
 	if opts.Input == nil && (opts.ForceTtyIn || util.IsTty(os.Stdin)) {
 		command = fmt.Sprintf(`%s > %q`, commandPrefix, output)
 	} else {
-		input, err := fifo("proxy-input")
+		input, err = fifo("proxy-input")
 		if err != nil {
 			return ExitError, err
 		}
@@ -90,11 +116,12 @@ func runProxy(commandPrefix string, cmdBuilder func(temp string, needBash bool) 
 		}
 	}
 
-	// To ensure that the options are processed by a POSIX-compliant shell,
-	// we need to write the command to a temporary file and execute it with sh.
+	// Write the command to a temporary file and run it with sh to ensure POSIX compliance.
 	var exports []string
 	needBash := false
 	if withExports {
+		// Nullify FZF_DEFAULT_* variables as tmux popup may inject them even when undefined.
+		exports = []string{"FZF_DEFAULT_COMMAND=", "FZF_DEFAULT_OPTS=", "FZF_DEFAULT_OPTS_FILE="}
 		validIdentifier := regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]*$`)
 		for _, pairStr := range os.Environ() {
 			pair := strings.SplitN(pairStr, "=", 2)
@@ -144,10 +171,13 @@ func runProxy(commandPrefix string, cmdBuilder func(temp string, needBash bool) 
 					env = elems[1:]
 				}
 				executor := util.NewExecutor(opts.WithShell)
-				ttyin, err := tui.TtyIn()
+				ttyin, err := tui.TtyIn(opts.TtyDefault)
 				if err != nil {
 					return ExitError, err
 				}
+				os.Remove(temp)
+				os.Remove(input)
+				os.Remove(output)
 				executor.Become(ttyin, env, command)
 			}
 			return code, err

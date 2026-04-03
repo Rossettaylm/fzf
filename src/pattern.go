@@ -60,8 +60,13 @@ type Pattern struct {
 	cacheKey      string
 	delimiter     Delimiter
 	nth           []Range
-	procFun       map[termType]algo.Algo
+	revision      revision
+	procFun       [6]algo.Algo
 	cache         *ChunkCache
+	denylist      map[int32]struct{}
+	startIndex    int32
+	directAlgo    algo.Algo
+	directTerm    *term
 }
 
 var _splitRegex *regexp.Regexp
@@ -72,7 +77,7 @@ func init() {
 
 // BuildPattern builds Pattern object from the given arguments
 func BuildPattern(cache *ChunkCache, patternCache map[string]*Pattern, fuzzy bool, fuzzyAlgo algo.Algo, extended bool, caseMode Case, normalize bool, forward bool,
-	withPos bool, cacheable bool, nth []Range, delimiter Delimiter, runes []rune) *Pattern {
+	withPos bool, cacheable bool, nth []Range, delimiter Delimiter, revision revision, runes []rune, denylist map[int32]struct{}, startIndex int32) *Pattern {
 
 	var asString string
 	if extended {
@@ -140,11 +145,15 @@ func BuildPattern(cache *ChunkCache, patternCache map[string]*Pattern, fuzzy boo
 		sortable:      sortable,
 		cacheable:     cacheable,
 		nth:           nth,
+		revision:      revision,
 		delimiter:     delimiter,
 		cache:         cache,
-		procFun:       make(map[termType]algo.Algo)}
+		denylist:      denylist,
+		startIndex:    startIndex,
+	}
 
 	ptr.cacheKey = ptr.buildCacheKey()
+	ptr.directAlgo, ptr.directTerm = ptr.buildDirectAlgo(fuzzyAlgo)
 	ptr.procFun[termFuzzy] = fuzzyAlgo
 	ptr.procFun[termEqual] = algo.EqualMatch
 	ptr.procFun[termExact] = algo.ExactMatchNaive
@@ -241,6 +250,9 @@ func parseTerms(fuzzy bool, caseMode Case, normalize bool, str string) []termSet
 
 // IsEmpty returns true if the pattern is effectively empty
 func (p *Pattern) IsEmpty() bool {
+	if len(p.denylist) > 0 {
+		return false
+	}
 	if !p.extended {
 		return len(p.text) == 0
 	}
@@ -265,6 +277,22 @@ func (p *Pattern) buildCacheKey() string {
 	return strings.Join(cacheableTerms, "\t")
 }
 
+// buildDirectAlgo returns the algo function and term for the direct fast path
+// in matchChunk. Returns (nil, nil) if the pattern is not suitable.
+// Requirements: extended mode, single term set with single non-inverse fuzzy term, no nth.
+func (p *Pattern) buildDirectAlgo(fuzzyAlgo algo.Algo) (algo.Algo, *term) {
+	if !p.extended || len(p.nth) > 0 {
+		return nil, nil
+	}
+	if len(p.termSets) == 1 && len(p.termSets[0]) == 1 {
+		t := &p.termSets[0][0]
+		if !t.inv && t.typ == termFuzzy {
+			return fuzzyAlgo, t
+		}
+	}
+	return nil, nil
+}
+
 // CacheKey is used to build string to be used as the key of result cache
 func (p *Pattern) CacheKey() string {
 	return p.cacheKey
@@ -272,60 +300,104 @@ func (p *Pattern) CacheKey() string {
 
 // Match returns the list of matches Items in the given Chunk
 func (p *Pattern) Match(chunk *Chunk, slab *util.Slab) []Result {
-	// ChunkCache: Exact match
 	cacheKey := p.CacheKey()
+
+	// Bitmap cache: exact match or prefix/suffix
+	var cachedBitmap *ChunkBitmap
 	if p.cacheable {
-		if cached := p.cache.Lookup(chunk, cacheKey); cached != nil {
-			return cached
-		}
+		cachedBitmap = p.cache.Lookup(chunk, cacheKey)
+	}
+	if cachedBitmap == nil {
+		cachedBitmap = p.cache.Search(chunk, cacheKey)
 	}
 
-	// Prefix/suffix cache
-	space := p.cache.Search(chunk, cacheKey)
-
-	matches := p.matchChunk(chunk, space, slab)
+	matches, bitmap := p.matchChunk(chunk, cachedBitmap, slab)
 
 	if p.cacheable {
-		p.cache.Add(chunk, cacheKey, matches)
+		p.cache.Add(chunk, cacheKey, bitmap, len(matches))
 	}
 	return matches
 }
 
-func (p *Pattern) matchChunk(chunk *Chunk, space []Result, slab *util.Slab) []Result {
+func (p *Pattern) matchChunk(chunk *Chunk, cachedBitmap *ChunkBitmap, slab *util.Slab) ([]Result, ChunkBitmap) {
 	matches := []Result{}
+	var bitmap ChunkBitmap
 
-	if space == nil {
-		for idx := 0; idx < chunk.count; idx++ {
-			if match, _, _ := p.MatchItem(&chunk.items[idx], p.withPos, slab); match != nil {
-				matches = append(matches, *match)
-			}
-		}
-	} else {
-		for _, result := range space {
-			if match, _, _ := p.MatchItem(result.item, p.withPos, slab); match != nil {
-				matches = append(matches, *match)
-			}
+	// Skip header items in chunks that contain them
+	startIdx := 0
+	if p.startIndex > 0 && chunk.count > 0 && chunk.items[0].Index() < p.startIndex {
+		startIdx = int(p.startIndex - chunk.items[0].Index())
+		if startIdx >= chunk.count {
+			return matches, bitmap
 		}
 	}
-	return matches
+
+	hasCachedBitmap := cachedBitmap != nil
+
+	// Fast path: single fuzzy term, no nth, no denylist.
+	// Calls the algo function directly, bypassing MatchItem/extendedMatch/iter
+	// and avoiding per-match []Offset heap allocation.
+	if p.directAlgo != nil && len(p.denylist) == 0 {
+		t := p.directTerm
+		for idx := startIdx; idx < chunk.count; idx++ {
+			if hasCachedBitmap && cachedBitmap[idx/64]&(uint64(1)<<(idx%64)) == 0 {
+				continue
+			}
+			res, _ := p.directAlgo(t.caseSensitive, t.normalize, p.forward,
+				&chunk.items[idx].text, t.text, p.withPos, slab)
+			if res.Start >= 0 {
+				bitmap[idx/64] |= uint64(1) << (idx % 64)
+				matches = append(matches, buildResultFromBounds(
+					&chunk.items[idx], res.Score,
+					int(res.Start), int(res.End), int(res.End), true))
+			}
+		}
+		return matches, bitmap
+	}
+
+	if len(p.denylist) == 0 {
+		for idx := startIdx; idx < chunk.count; idx++ {
+			if hasCachedBitmap && cachedBitmap[idx/64]&(uint64(1)<<(idx%64)) == 0 {
+				continue
+			}
+			if match, _, _ := p.MatchItem(&chunk.items[idx], p.withPos, slab); match.item != nil {
+				bitmap[idx/64] |= uint64(1) << (idx % 64)
+				matches = append(matches, match)
+			}
+		}
+		return matches, bitmap
+	}
+
+	for idx := startIdx; idx < chunk.count; idx++ {
+		if hasCachedBitmap && cachedBitmap[idx/64]&(uint64(1)<<(idx%64)) == 0 {
+			continue
+		}
+		if _, prs := p.denylist[chunk.items[idx].Index()]; prs {
+			continue
+		}
+		if match, _, _ := p.MatchItem(&chunk.items[idx], p.withPos, slab); match.item != nil {
+			bitmap[idx/64] |= uint64(1) << (idx % 64)
+			matches = append(matches, match)
+		}
+	}
+	return matches, bitmap
 }
 
-// MatchItem returns true if the Item is a match
-func (p *Pattern) MatchItem(item *Item, withPos bool, slab *util.Slab) (*Result, []Offset, *[]int) {
+// MatchItem returns the match result if the Item is a match.
+// A zero-value Result (with item == nil) indicates no match.
+func (p *Pattern) MatchItem(item *Item, withPos bool, slab *util.Slab) (Result, []Offset, *[]int) {
 	if p.extended {
 		if offsets, bonus, pos := p.extendedMatch(item, withPos, slab); len(offsets) == len(p.termSets) {
-			result := buildResult(item, offsets, bonus)
-			return &result, offsets, pos
+			return buildResult(item, offsets, bonus), offsets, pos
 		}
-		return nil, nil, nil
+		return Result{}, nil, nil
 	}
 	offset, bonus, pos := p.basicMatch(item, withPos, slab)
 	if sidx := offset[0]; sidx >= 0 {
 		offsets := []Offset{offset}
-		result := buildResult(item, offsets, bonus)
-		return &result, offsets, pos
+		return buildResult(item, offsets, bonus), offsets, pos
 	}
-	return nil, nil, nil
+	return Result{}, nil, nil
 }
 
 func (p *Pattern) basicMatch(item *Item, withPos bool, slab *util.Slab) (Offset, int, *[]int) {
@@ -393,12 +465,22 @@ func (p *Pattern) extendedMatch(item *Item, withPos bool, slab *util.Slab) ([]Of
 
 func (p *Pattern) transformInput(item *Item) []Token {
 	if item.transformed != nil {
-		return *item.transformed
+		transformed := *item.transformed
+		if transformed.revision == p.revision {
+			return transformed.tokens
+		}
 	}
 
 	tokens := Tokenize(item.text.ToString(), p.delimiter)
 	ret := Transform(tokens, p.nth)
-	item.transformed = &ret
+	// Strip the last delimiter to allow suffix match
+	if len(ret) > 0 && !p.delimiter.IsAwk() {
+		chars := ret[len(ret)-1].text
+		stripped := StripLastDelimiter(chars.ToString(), p.delimiter)
+		newChars := util.ToChars(stringBytes(stripped))
+		ret[len(ret)-1].text = &newChars
+	}
+	item.transformed = &transformed{p.revision, ret}
 	return ret
 }
 

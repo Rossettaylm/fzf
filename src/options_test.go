@@ -9,9 +9,13 @@ import (
 )
 
 func TestDelimiterRegex(t *testing.T) {
-	// Valid regex
+	// Valid regex, but a single character -> string
 	delim := delimiterRegexp(".")
-	if delim.regex == nil || delim.str != nil {
+	if delim.regex != nil || *delim.str != "." {
+		t.Error(delim)
+	}
+	delim = delimiterRegexp("|")
+	if delim.regex != nil || *delim.str != "|" {
 		t.Error(delim)
 	}
 	// Broken regex -> string
@@ -138,7 +142,7 @@ func TestIrrelevantNth(t *testing.T) {
 }
 
 func TestParseKeys(t *testing.T) {
-	pairs, _ := parseKeyChords("ctrl-z,alt-z,f2,@,Alt-a,!,ctrl-G,J,g,ctrl-alt-a,ALT-enter,alt-SPACE", "")
+	pairs, _, _ := parseKeyChords("ctrl-z,alt-z,f2,@,Alt-a,!,ctrl-G,J,g,ctrl-alt-a,ALT-enter,alt-SPACE", "")
 	checkEvent := func(e tui.Event, s string) {
 		if pairs[e] != s {
 			t.Errorf("%s != %s", pairs[e], s)
@@ -164,11 +168,11 @@ func TestParseKeys(t *testing.T) {
 	checkEvent(tui.AltKey(' '), "alt-SPACE")
 
 	// Synonyms
-	pairs, _ = parseKeyChords("enter,Return,space,tab,btab,esc,up,down,left,right", "")
+	pairs, _, _ = parseKeyChords("enter,Return,space,tab,btab,esc,up,down,left,right", "")
 	if len(pairs) != 9 {
 		t.Error(9)
 	}
-	check(tui.CtrlM, "Return")
+	check(tui.Enter, "Return")
 	checkEvent(tui.Key(' '), "space")
 	check(tui.Tab, "tab")
 	check(tui.ShiftTab, "btab")
@@ -178,7 +182,7 @@ func TestParseKeys(t *testing.T) {
 	check(tui.Left, "left")
 	check(tui.Right, "right")
 
-	pairs, _ = parseKeyChords("Tab,Ctrl-I,PgUp,page-up,pgdn,Page-Down,Home,End,Alt-BS,Alt-BSpace,shift-left,shift-right,btab,shift-tab,return,Enter,bspace", "")
+	pairs, _, _ = parseKeyChords("Tab,Ctrl-I,PgUp,page-up,pgdn,Page-Down,Home,End,Alt-BS,Alt-BSpace,shift-left,shift-right,btab,shift-tab,return,Enter,bspace", "")
 	if len(pairs) != 11 {
 		t.Error(11)
 	}
@@ -191,7 +195,7 @@ func TestParseKeys(t *testing.T) {
 	check(tui.ShiftLeft, "shift-left")
 	check(tui.ShiftRight, "shift-right")
 	check(tui.ShiftTab, "shift-tab")
-	check(tui.CtrlM, "Enter")
+	check(tui.Enter, "Enter")
 	check(tui.Backspace, "bspace")
 }
 
@@ -207,40 +211,40 @@ func TestParseKeysWithComma(t *testing.T) {
 		}
 	}
 
-	pairs, _ := parseKeyChords(",", "")
+	pairs, _, _ := parseKeyChords(",", "")
 	checkN(len(pairs), 1)
 	check(pairs, tui.Key(','), ",")
 
-	pairs, _ = parseKeyChords(",,a,b", "")
+	pairs, _, _ = parseKeyChords(",,a,b", "")
 	checkN(len(pairs), 3)
 	check(pairs, tui.Key('a'), "a")
 	check(pairs, tui.Key('b'), "b")
 	check(pairs, tui.Key(','), ",")
 
-	pairs, _ = parseKeyChords("a,b,,", "")
+	pairs, _, _ = parseKeyChords("a,b,,", "")
 	checkN(len(pairs), 3)
 	check(pairs, tui.Key('a'), "a")
 	check(pairs, tui.Key('b'), "b")
 	check(pairs, tui.Key(','), ",")
 
-	pairs, _ = parseKeyChords("a,,,b", "")
+	pairs, _, _ = parseKeyChords("a,,,b", "")
 	checkN(len(pairs), 3)
 	check(pairs, tui.Key('a'), "a")
 	check(pairs, tui.Key('b'), "b")
 	check(pairs, tui.Key(','), ",")
 
-	pairs, _ = parseKeyChords("a,,,b,c", "")
+	pairs, _, _ = parseKeyChords("a,,,b,c", "")
 	checkN(len(pairs), 4)
 	check(pairs, tui.Key('a'), "a")
 	check(pairs, tui.Key('b'), "b")
 	check(pairs, tui.Key('c'), "c")
 	check(pairs, tui.Key(','), ",")
 
-	pairs, _ = parseKeyChords(",,,", "")
+	pairs, _, _ = parseKeyChords(",,,", "")
 	checkN(len(pairs), 1)
 	check(pairs, tui.Key(','), ",")
 
-	pairs, _ = parseKeyChords(",ALT-,,", "")
+	pairs, _, _ = parseKeyChords(",ALT-,,", "")
 	checkN(len(pairs), 1)
 	check(pairs, tui.AltKey(','), "ALT-,")
 }
@@ -296,8 +300,12 @@ func TestBind(t *testing.T) {
 }
 
 func TestColorSpec(t *testing.T) {
+	var base *tui.ColorTheme
 	theme := tui.Dark256
-	dark, _ := parseTheme(theme, "dark")
+	base, dark, _ := parseTheme(theme, "dark")
+	if *dark != *base {
+		t.Errorf("incorrect base theme returned")
+	}
 	if *dark != *theme {
 		t.Errorf("colors should be equivalent")
 	}
@@ -305,7 +313,10 @@ func TestColorSpec(t *testing.T) {
 		t.Errorf("point should not be equivalent")
 	}
 
-	light, _ := parseTheme(theme, "dark,light")
+	base, light, _ := parseTheme(theme, "dark,light")
+	if *light != *base {
+		t.Errorf("incorrect base theme returned")
+	}
 	if *light == *theme {
 		t.Errorf("should not be equivalent")
 	}
@@ -316,7 +327,7 @@ func TestColorSpec(t *testing.T) {
 		t.Errorf("point should not be equivalent")
 	}
 
-	customized, _ := parseTheme(theme, "fg:231,bg:232")
+	_, customized, _ := parseTheme(theme, "fg:231,bg:232")
 	if customized.Fg.Color != 231 || customized.Bg.Color != 232 {
 		t.Errorf("color not customized")
 	}
@@ -329,7 +340,7 @@ func TestColorSpec(t *testing.T) {
 		t.Errorf("colors should now be equivalent: %v, %v", tui.Dark256, customized)
 	}
 
-	customized, _ = parseTheme(theme, "fg:231,dark,bg:232")
+	_, customized, _ = parseTheme(theme, "fg:231,dark   bg:232")
 	if customized.Fg != tui.Dark256.Fg || customized.Bg == tui.Dark256.Bg {
 		t.Errorf("color not customized")
 	}
@@ -346,8 +357,8 @@ func TestDefaultCtrlNP(t *testing.T) {
 			t.Error()
 		}
 	}
-	check([]string{}, tui.CtrlN, actDown)
-	check([]string{}, tui.CtrlP, actUp)
+	check([]string{}, tui.CtrlN, actDownMatch)
+	check([]string{}, tui.CtrlP, actUpMatch)
 
 	check([]string{"--bind=ctrl-n:accept"}, tui.CtrlN, actAccept)
 	check([]string{"--bind=ctrl-p:accept"}, tui.CtrlP, actAccept)
@@ -437,6 +448,64 @@ func TestPreviewOpts(t *testing.T) {
 		opts.Preview.size.size == 70) {
 		t.Error(opts.Preview)
 	}
+
+	// wrap-word tests
+	opts = optsFor("--preview-window=wrap-word")
+	if !(opts.Preview.wrap == true && opts.Preview.wrapWord == true) {
+		t.Errorf("wrap-word: wrap=%v, wrapWord=%v", opts.Preview.wrap, opts.Preview.wrapWord)
+	}
+	opts = optsFor("--preview-window=wrap-word,nowrap")
+	if !(opts.Preview.wrap == false && opts.Preview.wrapWord == false) {
+		t.Errorf("wrap-word,nowrap: wrap=%v, wrapWord=%v", opts.Preview.wrap, opts.Preview.wrapWord)
+	}
+	opts = optsFor("--preview-window=wrap-word,wrap")
+	if !(opts.Preview.wrap == true && opts.Preview.wrapWord == false) {
+		t.Errorf("wrap-word,wrap: wrap=%v, wrapWord=%v", opts.Preview.wrap, opts.Preview.wrapWord)
+	}
+}
+
+func TestPreviewWrapSign(t *testing.T) {
+	// Default: no preview wrap sign override
+	opts := optsFor()
+	if opts.PreviewWrapSign != nil {
+		t.Errorf("expected nil PreviewWrapSign, got %v", *opts.PreviewWrapSign)
+	}
+
+	// --preview-wrap-sign sets PreviewWrapSign
+	opts = optsFor("--preview-wrap-sign", ">> ")
+	if opts.PreviewWrapSign == nil || *opts.PreviewWrapSign != ">> " {
+		t.Errorf("expected '>> ', got %v", opts.PreviewWrapSign)
+	}
+
+	// --preview-wrap-sign is independent of --wrap-sign
+	opts = optsFor("--wrap-sign", "| ", "--preview-wrap-sign", ">> ")
+	if opts.WrapSign == nil || *opts.WrapSign != "| " {
+		t.Errorf("expected WrapSign '| ', got %v", opts.WrapSign)
+	}
+	if opts.PreviewWrapSign == nil || *opts.PreviewWrapSign != ">> " {
+		t.Errorf("expected PreviewWrapSign '>> ', got %v", opts.PreviewWrapSign)
+	}
+
+	// --preview-wrap-sign without --wrap-sign
+	opts = optsFor("--preview-wrap-sign", "→ ")
+	if opts.WrapSign != nil {
+		t.Errorf("expected nil WrapSign, got %v", *opts.WrapSign)
+	}
+	if opts.PreviewWrapSign == nil || *opts.PreviewWrapSign != "→ " {
+		t.Errorf("expected PreviewWrapSign '→ ', got %v", opts.PreviewWrapSign)
+	}
+
+	// Last --preview-wrap-sign wins
+	opts = optsFor("--preview-wrap-sign", "A ", "--preview-wrap-sign", "B ")
+	if opts.PreviewWrapSign == nil || *opts.PreviewWrapSign != "B " {
+		t.Errorf("expected PreviewWrapSign 'B ', got %v", opts.PreviewWrapSign)
+	}
+
+	// Empty string is allowed
+	opts = optsFor("--preview-wrap-sign", "")
+	if opts.PreviewWrapSign == nil || *opts.PreviewWrapSign != "" {
+		t.Errorf("expected empty PreviewWrapSign, got %v", opts.PreviewWrapSign)
+	}
 }
 
 func TestAdditiveExpect(t *testing.T) {
@@ -458,7 +527,7 @@ func TestValidateSign(t *testing.T) {
 	}
 
 	for _, testCase := range testCases {
-		err := validateSign(testCase.inputSign, "")
+		err := validateSign(testCase.inputSign, "", 2)
 		if testCase.isValid && err != nil {
 			t.Errorf("Input sign `%s` caused error", testCase.inputSign)
 		}
