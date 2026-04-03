@@ -223,6 +223,9 @@ fi
 
 [[ $* =~ "--bin" ]] && exit 0
 
+# Shell configuration is managed in zsh/fzf.zsh, skip interactive setup
+exit 0
+
 for s in $shells; do
   if ! command -v "$s" > /dev/null; then
     shells=${shells/$s/}
